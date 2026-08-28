@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Local Scraping Cache (do not commit cached HTML files)
+cache/
+
+# Logs and outputs
+output/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
