@@ -60,24 +60,26 @@ export async function politeFetch(url, customCacheFilename) {
     });
     clearTimeout(timeoutId);
 
-    // 3. Status check: Only 200 means "here is your page"
     if (response.status !== 200) {
-      throw new Error(
-        `Failed to fetch page. HTTP status code: ${response.status}`,
-      );
+      const error = new Error(`HTTP status code: ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
 
     const html = await response.text();
     const size = Buffer.byteLength(html, "utf-8");
 
-    // 4. Save to cache
+    // Save to cache
     await fs.writeFile(cachePath, html, "utf-8");
 
     return { html, isCacheHit: false, size, status: response.status };
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === "AbortError") {
-      throw new Error(`Request timed out after ${TIMEOUT_MS / 1000}s: ${url}`);
+      const error = new Error(`Request timed out after ${TIMEOUT_MS / 1000}s`);
+      error.status = 408; // Request Timeout
+      error.isTimeout = true;
+      throw error;
     }
     throw err;
   }
