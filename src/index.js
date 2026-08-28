@@ -1,19 +1,13 @@
-import { politeFetch } from "./fetcher.js";
+import { discoverCatalogueBooks } from "./crawler.js";
 
 async function main() {
-  const targetUrl = "https://books.toscrape.com/catalogue/page-1.html";
-  const cacheFile = "catalogue-page-1.html";
-
   try {
-    const result = await politeFetch(targetUrl, cacheFile);
+    const { cataloguePagesCount, discoveredCount, uniqueCount } =
+      await discoverCatalogueBooks();
 
-    if (result.isCacheHit) {
-      console.log(`CACHE HIT - size: ${result.size} bytes (${cacheFile})`);
-    } else {
-      console.log(
-        `FETCH - status: ${result.status}, size: ${result.size} bytes (saved to cache/${cacheFile})`,
-      );
-    }
+    console.log(
+      `catalogue_pages=${cataloguePagesCount}, discovered=${discoveredCount}, unique_urls=${uniqueCount}`,
+    );
   } catch (error) {
     console.error(`Error: ${error.message}`);
   }
