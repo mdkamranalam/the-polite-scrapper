@@ -138,3 +138,26 @@ The data is already present in the raw static HTML the server sends over HTTP, s
   6. Schema validation rejecting malformed fixtures into `errors`.
 - Run tests: `npm test`
 
+---
+
+## 9. Bonus Stage — The AI Rematch ("AI vs Me")
+
+### The Hand-Written Specification Prompt
+> *"Write a Node.js web scraper using built-in fetch, Cheerio, and Zod that collects books from Books to Scrape (`https://books.toscrape.com/catalogue/page-1.html`). Crawl the first 3 catalogue pages by following pagination 'next' links to discover exactly 60 book detail URLs. For each book, extract 8 raw fields (`title`, `product_url`, `price_text`, `availability_text`, `rating_text`, `description`, `source_page`, `fetched_at`) plus normalized numeric `price_gbp`. Cache every page to disk under `cache/` so reruns don't hit the network. Enforce a 500ms delay between live requests, a polite identifying User-Agent, and a 5s timeout. If a book has no description, store null (do not invent text). Isolate per-page errors so a broken page is skipped and logged without crashing the process. Store deduplicated records to `output/books.json` and generate an honest `output/run-report.json`."*
+
+### Checkpoint Results Comparison
+| Metric / Checkpoint | Hand-Built Version (`src/`) | AI-Generated Version (`ai-version/`) |
+|---|---|---|
+| Discovered Books (3 pages) | 60 | 60 |
+| Valid Records Saved | 60 | 60 |
+| Cache Hit Re-run (Idempotency) | 60 records (0 duplicates) | 60 records (0 duplicates) |
+| Survives Bad URL (`--test-broken`) | Survives, logs to `errors.json`, `failed_pages: 1` | Survives via general catch, increments failed counter |
+| Modular Structure | Clean separation (`fetcher`, `crawler`, `extractor`, `schema`, `index`) | Single monolithic file |
+| Test Coverage | 6 unit tests with HTML fixtures | No test fixtures |
+
+### Three Concrete Differences
+1. **Error Granularity & Retry Logic**: The hand-built version explicitly inspects HTTP status codes and selectively retries transient faults (timeouts / 5xx) while never retrying 404 or 403. The AI version lumped all failures into a generic `try/catch` without distinguished HTTP retry semantics.
+2. **Selector Specificity & Defense**: The hand-built version scopes all DOM selectors strictly to `div.product_main` to prevent collisions if the page template contains header/footer prices or recommendations. The AI version used looser selectors like `$("p.price_color").first()`.
+3. **Structured Errors & Detailed Provenance**: The hand-built version writes detailed validation issue payloads to `output/errors.json` alongside reason codes and raw record snapshots, whereas the AI version simply incremented a numerical failure counter and discarded the error cause.
+
+
