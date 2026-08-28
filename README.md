@@ -116,3 +116,25 @@ The data is already present in the raw static HTML the server sends over HTTP, s
 ## 7. Honest Limitation
 
 - **Static Content Only**: The pipeline is designed for static server-rendered HTML. It does not evaluate client-side JavaScript rendering (Single Page Applications / client-side hydrated frameworks).
+
+---
+
+## 8. Optional Extras (Completed)
+
+### 1. CSV Export (`output/books.csv`)
+- Produces standard CSV format from validated records.
+- Run command: `node src/export-csv.js`
+- **Flattened Values Note**: Multiline descriptions and special commas/quotes are flattened and properly escaped to guarantee valid CSV rows across spreadsheet parsers.
+
+### 2. Selector Fixtures & Unit Testing (`tests/`)
+- Uses Node.js built-in test runner (`node --test tests/*.test.js`).
+- Includes offline HTML fixtures (`tests/fixtures/missing-description.html` and `tests/fixtures/extra-whitespace.html`).
+- **6 Unit Tests Implemented**:
+  1. Price normalization (`£51.77` -> `51.77`).
+  2. Relative to absolute URL resolution using `new URL()`.
+  3. Offline fixture handling for books without descriptions (`null`).
+  4. Offline fixture handling for extra whitespace and carriage returns.
+  5. Canonical URL deduplication.
+  6. Schema validation rejecting malformed fixtures into `errors`.
+- Run tests: `npm test`
+
