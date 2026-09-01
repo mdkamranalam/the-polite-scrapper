@@ -160,4 +160,53 @@ The data is already present in the raw static HTML the server sends over HTTP, s
 2. **Selector Specificity & Defense**: The hand-built version scopes all DOM selectors strictly to `div.product_main` to prevent collisions if the page template contains header/footer prices or recommendations. The AI version used looser selectors like `$("p.price_color").first()`.
 3. **Structured Errors & Detailed Provenance**: The hand-built version writes detailed validation issue payloads to `output/errors.json` alongside reason codes and raw record snapshots, whereas the AI version simply incremented a numerical failure counter and discarded the error cause.
 
+---
 
+## 10. LLM API Endpoint: Book Enrichment (`POST /enrich`)
+
+An LLM-powered backend endpoint that takes scraped book details and classifies the genre category, targets audience, creates a 1-sentence summary, and identifies data quality flags.
+
+### Provider Abstraction Note
+Three environment variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`) are the only difference between a model running locally on your laptop (via Ollama) and one running in a cloud datacenter (via OpenRouter). Hardcoding providers is never needed.
+
+### Quick Testing with Stub Mode (`LLM_STUB=1`)
+In stub mode, the endpoint verifies input schema and returns an immediate schema-valid object without spending any LLM tokens or quota:
+
+#### 1. Valid Request (`200 OK`)
+```bash
+curl -s -X POST http://localhost:3000/enrich \
+  -H "Content-Type: application/json" \
+  -d '{"title": "A Light in the Attic", "description": "A collection of poems and drawings."}'
+```
+**Response:**
+```json
+{
+  "category": "fiction",
+  "target_audience": "general",
+  "summary": "A stubbed book summary returned in development mode without invoking any LLM calls.",
+  "confidence": 0.95,
+  "quality_flags": ["clean"]
+}
+```
+
+#### 2. Deliberately Broken Request (`400 Bad Request`)
+```bash
+curl -s -i -X POST http://localhost:3000/enrich \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Missing title field"}'
+```
+**Response:**
+```json
+HTTP/1.1 400 Bad Request
+Content-Type: application/json; charset=utf-8
+
+{
+  "error": "Bad Request",
+  "details": [
+    {
+      "field": "title",
+      "message": "field 'title' is required"
+    }
+  ]
+}
+```
