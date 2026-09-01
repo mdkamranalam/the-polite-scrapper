@@ -8,6 +8,9 @@ cache/
 # Env
 .env
 
+# Logs
+logs/
+
 # OS / IDE
 .DS_Store
 .vscode/

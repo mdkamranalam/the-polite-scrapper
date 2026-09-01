@@ -1,6 +1,6 @@
 import express from "express";
 import { EnrichInputSchema, STUB_ENRICH_RESPONSE } from "../llm/schema.js";
-import { callEnrichModel } from "../llm/enricher.js";
+import { enrichBookRecord } from "../llm/enricher.js";
 
 export const enrichRouter = express.Router();
 
@@ -26,16 +26,17 @@ enrichRouter.post("/", async (req, res) => {
     return res.status(200).json(STUB_ENRICH_RESPONSE);
   }
 
-  // 3. Stage 2: Call real model with prompt v1 and return raw model response text
-  try {
-    const result = await callEnrichModel(inputData);
-    return res.status(200).send(result.rawText);
-  } catch (error) {
-    console.error("[Enrich LLM Error]:", error);
-    return res.status(500).json({
-      error: "LLM Call Failed",
-      message: error.message,
-    });
-  }
-});
+  // 3. Call LLM with Schema Validation, Single Repair Retry, and Quarantine fallback
+  const result = await enrichBookRecord(inputData);
 
+  if (result.success) {
+    // Contract guarantee: Never emit raw model strings, always return validated JSON object
+    return res.status(200).json(result.data);
+  }
+
+  // Error handling: Returns clean 422 with validation explanation or 500
+  return res.status(result.status || 500).json({
+    error: result.error,
+    message: result.message,
+  });
+});
