@@ -1,12 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import OpenAI from "openai";
+import { createChatCompletionWithPolicy } from "./client.js";
 import { EnrichOutputSchema } from "./schema.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// __dirname is .../scraper/src/llm -> project root is path.join(__dirname, "..", "..")
 const PROJECT_ROOT = path.join(__dirname, "..", "..");
 const PROMPT_PATH = path.join(PROJECT_ROOT, "prompts", "enrich-v1.md");
 export const LOGS_DIR = path.join(PROJECT_ROOT, "logs");
@@ -22,11 +21,6 @@ export async function getSystemPrompt() {
   }
   return cachedSystemPrompt;
 }
-
-const client = new OpenAI({
-  baseURL: process.env.LLM_BASE_URL,
-  apiKey: process.env.LLM_API_KEY,
-});
 
 /**
  * Strips markdown code fences (e.g. ```json ... ```) or prefix text to locate the JSON payload.
@@ -62,11 +56,12 @@ export function extractJsonFromText(rawText) {
 export async function logToQuarantine(entry) {
   try {
     await fs.mkdir(LOGS_DIR, { recursive: true });
-    const logLine = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      prompt_version: PROMPT_VERSION,
-      ...entry,
-    }) + "\n";
+    const logLine =
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        prompt_version: PROMPT_VERSION,
+        ...entry,
+      }) + "\n";
     await fs.appendFile(QUARANTINE_PATH, logLine, "utf-8");
   } catch (err) {
     console.error("[Quarantine Log Error]:", err.message);
@@ -74,16 +69,43 @@ export async function logToQuarantine(entry) {
 }
 
 /**
+ * Emits a structured log line for every call tracking cost, tokens, duration, and repair count
+ */
+function logCallCost({
+  promptVersion,
+  model,
+  inputTokens,
+  outputTokens,
+  durationMs,
+  repaired,
+  success,
+}) {
+  const logEntry = {
+    event: "llm_call_cost",
+    timestamp: new Date().toISOString(),
+    prompt_version: promptVersion,
+    model,
+    input_tokens: inputTokens ?? 0,
+    output_tokens: outputTokens ?? 0,
+    total_tokens: (inputTokens ?? 0) + (outputTokens ?? 0),
+    duration_ms: durationMs,
+    repaired: repaired,
+    success,
+  };
+  // Twelve-factor stdout logging
+  console.log(JSON.stringify(logEntry));
+}
+
+/**
  * Calls model and validates output against EnrichOutputSchema.
- * If invalid or unparseable, performs exactly ONE repair retry.
- * If repair fails, logs to quarantine.jsonl and returns { success: false, error, status: 422 }.
+ * Uses custom retry policy with exponential backoff & jitter, explicit 30s timeout,
+ * single repair retry on validation failure, and structured token/cost logging.
  */
 export async function enrichBookRecord(inputData) {
+  const startTime = Date.now();
   const systemPrompt = await getSystemPrompt();
-
   const userPayloadString = JSON.stringify(inputData);
 
-  // --- ATTEMPT 1 ---
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPayloadString },
@@ -91,45 +113,64 @@ export async function enrichBookRecord(inputData) {
 
   let rawOutput1 = "";
   let modelName = process.env.LLM_MODEL || "openrouter/free";
-  let usage = null;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
 
   try {
-    const res1 = await client.chat.completions.create({
+    // --- ATTEMPT 1 ---
+    const res1 = await createChatCompletionWithPolicy({
       model: modelName,
       temperature: 0.1,
       messages,
     });
 
     rawOutput1 = res1.choices[0]?.message?.content || "";
-    usage = res1.usage;
     modelName = res1.model || modelName;
+    totalInputTokens += res1.usage?.prompt_tokens || 0;
+    totalOutputTokens += res1.usage?.completion_tokens || 0;
 
-    // Parse JSON
-    const parsedJson1 = extractJsonFromText(rawOutput1);
-
-    // Validate with Zod safeParse
-    const validation1 = EnrichOutputSchema.safeParse(parsedJson1);
-    if (validation1.success) {
-      return {
-        success: true,
-        data: validation1.data,
-        attempts: 1,
-        model: modelName,
-        usage,
-      };
+    let parsedJson1;
+    let parseFailed = false;
+    try {
+      parsedJson1 = extractJsonFromText(rawOutput1);
+    } catch (parseErr) {
+      parseFailed = true;
     }
 
-    // Validation failed on Attempt 1 -> Prepare Repair Retry
-    const validationErrors1 = validation1.error.issues
-      .map((i) => `${i.path.join(".")}: ${i.message}`)
-      .join("; ");
+    if (!parseFailed) {
+      const validation1 = EnrichOutputSchema.safeParse(parsedJson1);
+      if (validation1.success) {
+        const durationMs = Date.now() - startTime;
+        logCallCost({
+          promptVersion: PROMPT_VERSION,
+          model: modelName,
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          durationMs,
+          repaired: false,
+          success: true,
+        });
 
-    // --- ATTEMPT 2: Repair Retry ---
-    const repairPrompt = `Your previous answer was rejected for this reason: ${validationErrors1}.
+        return {
+          success: true,
+          data: validation1.data,
+          attempts: 1,
+          model: modelName,
+          tokens: { input: totalInputTokens, output: totalOutputTokens },
+        };
+      }
+    }
+
+    // Validation or Parse failed on Attempt 1 -> Perform ONE Repair Retry
+    const reason = parseFailed
+      ? "Invalid JSON format"
+      : "Schema validation errors";
+
+    const repairPrompt = `Your previous answer was rejected for this reason: ${reason}.
 Previous output was:
 ${rawOutput1}
 
-Return ONLY corrected JSON matching the schema precisely. No extra text.`;
+Return ONLY corrected JSON matching the schema precisely. No extra text or markdown formatting.`;
 
     const repairMessages = [
       ...messages,
@@ -137,118 +178,86 @@ Return ONLY corrected JSON matching the schema precisely. No extra text.`;
       { role: "user", content: repairPrompt },
     ];
 
-    const res2 = await client.chat.completions.create({
+    const res2 = await createChatCompletionWithPolicy({
       model: modelName,
       temperature: 0.1,
       messages: repairMessages,
     });
 
     const rawOutput2 = res2.choices[0]?.message?.content || "";
+    totalInputTokens += res2.usage?.prompt_tokens || 0;
+    totalOutputTokens += res2.usage?.completion_tokens || 0;
 
-    const parsedJson2 = extractJsonFromText(rawOutput2);
-    const validation2 = EnrichOutputSchema.safeParse(parsedJson2);
+    try {
+      const parsedJson2 = extractJsonFromText(rawOutput2);
+      const validation2 = EnrichOutputSchema.safeParse(parsedJson2);
 
-    if (validation2.success) {
-      return {
-        success: true,
-        data: validation2.data,
-        attempts: 2,
-        repaired: true,
-        model: modelName,
-        usage: res2.usage || usage,
-      };
+      if (validation2.success) {
+        const durationMs = Date.now() - startTime;
+        logCallCost({
+          promptVersion: PROMPT_VERSION,
+          model: modelName,
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          durationMs,
+          repaired: true,
+          success: true,
+        });
+
+        return {
+          success: true,
+          data: validation2.data,
+          attempts: 2,
+          repaired: true,
+          model: modelName,
+          tokens: { input: totalInputTokens, output: totalOutputTokens },
+        };
+      }
+    } catch (_) {
+      // Ignored, handled in quarantine logging below
     }
 
-    // Attempt 2 failed validation as well
-    const validationErrors2 = validation2.error.issues
-      .map((i) => `${i.path.join(".")}: ${i.message}`)
-      .join("; ");
+    // Both attempts failed -> Quarantine & 422
+    const durationMs = Date.now() - startTime;
+    logCallCost({
+      promptVersion: PROMPT_VERSION,
+      model: modelName,
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
+      durationMs,
+      repaired: true,
+      success: false,
+    });
 
     await logToQuarantine({
       input: inputData,
       raw_output_attempt_1: rawOutput1,
-      raw_output_attempt_2: rawOutput2,
-      error: `Validation failed after repair: ${validationErrors2}`,
+      error: "Model output failed schema validation after 1 repair retry",
     });
 
     return {
       success: false,
       status: 422,
       error: "Unprocessable Entity",
-      message: `Model output failed schema validation after repair attempt: ${validationErrors2}`,
+      message: "Model output failed schema validation after repair attempt.",
     };
   } catch (err) {
-    // Parse error on attempt 1 or network error
-    if (rawOutput1 && !err.repairedAttempted) {
-      // Attempt repair for raw parsing failure
-      try {
-        const repairPrompt = `Your previous answer could not be parsed as valid JSON. Error: ${err.message}.
-Previous output was:
-${rawOutput1}
+    const durationMs = Date.now() - startTime;
+    logCallCost({
+      promptVersion: PROMPT_VERSION,
+      model: modelName,
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
+      durationMs,
+      repaired: false,
+      success: false,
+    });
 
-Return ONLY valid, raw JSON matching the schema. No markdown formatting.`;
-
-        const repairMessages = [
-          ...messages,
-          { role: "assistant", content: rawOutput1 },
-          { role: "user", content: repairPrompt },
-        ];
-
-        const res2 = await client.chat.completions.create({
-          model: modelName,
-          temperature: 0.1,
-          messages: repairMessages,
-        });
-
-        const rawOutput2 = res2.choices[0]?.message?.content || "";
-        const parsedJson2 = extractJsonFromText(rawOutput2);
-        const validation2 = EnrichOutputSchema.safeParse(parsedJson2);
-
-        if (validation2.success) {
-          return {
-            success: true,
-            data: validation2.data,
-            attempts: 2,
-            repaired: true,
-            model: modelName,
-            usage: res2.usage || usage,
-          };
-        }
-
-        await logToQuarantine({
-          input: inputData,
-          raw_output_attempt_1: rawOutput1,
-          raw_output_attempt_2: rawOutput2,
-          error: "JSON parse failed on attempt 1, schema validation failed on attempt 2",
-        });
-
-        return {
-          success: false,
-          status: 422,
-          error: "Unprocessable Entity",
-          message: "Model output failed schema validation after repair.",
-        };
-      } catch (repairErr) {
-        await logToQuarantine({
-          input: inputData,
-          raw_output_attempt_1: rawOutput1,
-          error: `Parsing failed on both attempts: ${repairErr.message}`,
-        });
-
-        return {
-          success: false,
-          status: 422,
-          error: "Unprocessable Entity",
-          message: "Model output could not be parsed as valid JSON after repair.",
-        };
-      }
-    }
-
-    // General failure
+    const status = err.status || 500;
     return {
       success: false,
-      status: 500,
-      error: "LLM Execution Error",
+      status,
+      error: status === 504 ? "Gateway Timeout" : "LLM Execution Error",
       message: err.message,
     };
   }
