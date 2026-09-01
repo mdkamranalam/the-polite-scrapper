@@ -52,7 +52,9 @@ export async function createChatCompletionWithPolicy(params, maxRetries = 2) {
       const isTimeout =
         err.name === "APIConnectionTimeoutError" ||
         err.code === "ETIMEDOUT" ||
+        err.type === "request_timeout" ||
         err.isTimeout ||
+        err.message?.toLowerCase().includes("timed out") ||
         err.message?.toLowerCase().includes("timeout");
 
       // Check non-retryable 4xx client errors (400, 401, 403)
