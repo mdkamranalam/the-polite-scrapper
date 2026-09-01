@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,22 @@ export const QUARANTINE_PATH = path.join(LOGS_DIR, "quarantine.jsonl");
 export const PROMPT_VERSION = "enrich-v1";
 
 let cachedSystemPrompt = null;
+
+// --- In-Memory Request Cache ---
+// Key format: SHA256(PROMPT_VERSION + "::" + JSON.stringify(sortedInput))
+const memoryCache = new Map();
+
+export function generateCacheKey(promptVersion, inputData) {
+  const normalized = JSON.stringify(inputData, Object.keys(inputData).sort());
+  return crypto
+    .createHash("sha256")
+    .update(`${promptVersion}::${normalized}`)
+    .digest("hex");
+}
+
+export function clearEnrichCache() {
+  memoryCache.clear();
+}
 
 export async function getSystemPrompt() {
   if (!cachedSystemPrompt) {
@@ -78,6 +95,7 @@ function logCallCost({
   outputTokens,
   durationMs,
   repaired,
+  cached,
   success,
 }) {
   const logEntry = {
@@ -90,6 +108,7 @@ function logCallCost({
     total_tokens: (inputTokens ?? 0) + (outputTokens ?? 0),
     duration_ms: durationMs,
     repaired: repaired,
+    cached: Boolean(cached),
     success,
   };
   // Twelve-factor stdout logging
@@ -98,11 +117,42 @@ function logCallCost({
 
 /**
  * Calls model and validates output against EnrichOutputSchema.
- * Uses custom retry policy with exponential backoff & jitter, explicit 30s timeout,
- * single repair retry on validation failure, and structured token/cost logging.
+ * Features:
+ * - In-Memory Cache (hashed by input + prompt version)
+ * - Custom retry policy with exponential backoff & jitter
+ * - Explicit 30s timeout
+ * - Single repair retry on validation failure
+ * - Structured token/cost logging
  */
 export async function enrichBookRecord(inputData) {
   const startTime = Date.now();
+  const cacheKey = generateCacheKey(PROMPT_VERSION, inputData);
+
+  // 1. Check in-memory cache
+  if (memoryCache.has(cacheKey)) {
+    const cachedData = memoryCache.get(cacheKey);
+    const durationMs = Date.now() - startTime;
+    logCallCost({
+      promptVersion: PROMPT_VERSION,
+      model: "memory-cache",
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs,
+      repaired: false,
+      cached: true,
+      success: true,
+    });
+
+    return {
+      success: true,
+      data: cachedData,
+      cached: true,
+      attempts: 0,
+      model: "cache-hit",
+      tokens: { input: 0, output: 0 },
+    };
+  }
+
   const systemPrompt = await getSystemPrompt();
   const userPayloadString = JSON.stringify(inputData);
 
@@ -141,6 +191,9 @@ export async function enrichBookRecord(inputData) {
       const validation1 = EnrichOutputSchema.safeParse(parsedJson1);
       if (validation1.success) {
         const durationMs = Date.now() - startTime;
+        // Save to cache
+        memoryCache.set(cacheKey, validation1.data);
+
         logCallCost({
           promptVersion: PROMPT_VERSION,
           model: modelName,
@@ -148,6 +201,7 @@ export async function enrichBookRecord(inputData) {
           outputTokens: totalOutputTokens,
           durationMs,
           repaired: false,
+          cached: false,
           success: true,
         });
 
@@ -194,6 +248,9 @@ Return ONLY corrected JSON matching the schema precisely. No extra text or markd
 
       if (validation2.success) {
         const durationMs = Date.now() - startTime;
+        // Save to cache
+        memoryCache.set(cacheKey, validation2.data);
+
         logCallCost({
           promptVersion: PROMPT_VERSION,
           model: modelName,
@@ -201,6 +258,7 @@ Return ONLY corrected JSON matching the schema precisely. No extra text or markd
           outputTokens: totalOutputTokens,
           durationMs,
           repaired: true,
+          cached: false,
           success: true,
         });
 
@@ -226,6 +284,7 @@ Return ONLY corrected JSON matching the schema precisely. No extra text or markd
       outputTokens: totalOutputTokens,
       durationMs,
       repaired: true,
+      cached: false,
       success: false,
     });
 
@@ -250,6 +309,7 @@ Return ONLY corrected JSON matching the schema precisely. No extra text or markd
       outputTokens: totalOutputTokens,
       durationMs,
       repaired: false,
+      cached: false,
       success: false,
     });
 
