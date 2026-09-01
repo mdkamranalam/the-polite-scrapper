@@ -1,5 +1,6 @@
 import express from "express";
 import { EnrichInputSchema, STUB_ENRICH_RESPONSE } from "../llm/schema.js";
+import { callEnrichModel } from "../llm/enricher.js";
 
 export const enrichRouter = express.Router();
 
@@ -25,9 +26,16 @@ enrichRouter.post("/", async (req, res) => {
     return res.status(200).json(STUB_ENRICH_RESPONSE);
   }
 
-  // Model call logic will be connected in Stages 2 & 3
-  return res.status(501).json({
-    error: "Not Implemented",
-    message: "LLM integration will be active in Stage 2/3. Use LLM_STUB=1 for stub mode.",
-  });
+  // 3. Stage 2: Call real model with prompt v1 and return raw model response text
+  try {
+    const result = await callEnrichModel(inputData);
+    return res.status(200).send(result.rawText);
+  } catch (error) {
+    console.error("[Enrich LLM Error]:", error);
+    return res.status(500).json({
+      error: "LLM Call Failed",
+      message: error.message,
+    });
+  }
 });
+
